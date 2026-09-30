@@ -210,17 +210,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # fork-trim: fnOS test releases need only the Linux x86_64 binary
+          # plus the Docker images. Restore commented entries for a full
+          # distribution release.
           # Use ubuntu-22.04 for Linux builds to link against glibc 2.35,
           # ensuring compatibility with Ubuntu 22.04+ (#3573).
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: zeroclaw
             ext: tar.gz
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            artifact: zeroclaw
-            ext: tar.gz
-            use_cross: true
+          # - os: ubuntu-22.04
+          #   target: x86_64-unknown-linux-musl
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          #   use_cross: true
+          # Kept: the tag-path docker job assembles a multi-arch (amd64+arm64)
+          # image from this and the x86_64 gnu artifact.
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             artifact: zeroclaw
@@ -228,43 +233,43 @@ jobs:
             cross_compiler: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
             linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
             linker: aarch64-linux-gnu-gcc
-          - os: ubuntu-22.04
-            target: aarch64-unknown-linux-musl
-            artifact: zeroclaw
-            ext: tar.gz
-            use_cross: true
-          - os: ubuntu-22.04
-            target: armv7-unknown-linux-gnueabihf
-            artifact: zeroclaw
-            ext: tar.gz
-            cross_compiler: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-            linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
-            linker: arm-linux-gnueabihf-gcc
-          - os: ubuntu-22.04
-            target: arm-unknown-linux-gnueabihf
-            artifact: zeroclaw
-            ext: tar.gz
-            cross_compiler: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-            linker_env: CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER
-            linker: arm-linux-gnueabihf-gcc
-          - os: macos-14
-            target: aarch64-apple-darwin
-            artifact: zeroclaw
-            ext: tar.gz
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: zeroclaw
-            ext: tar.gz
-          - os: ubuntu-latest
-            target: aarch64-linux-android
-            artifact: zeroclaw
-            ext: tar.gz
-            ndk: true
-            experimental: true
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: zeroclaw.exe
-            ext: zip
+          # - os: ubuntu-22.04
+          #   target: aarch64-unknown-linux-musl
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          #   use_cross: true
+          # - os: ubuntu-22.04
+          #   target: armv7-unknown-linux-gnueabihf
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          #   cross_compiler: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          #   linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+          #   linker: arm-linux-gnueabihf-gcc
+          # - os: ubuntu-22.04
+          #   target: arm-unknown-linux-gnueabihf
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          #   cross_compiler: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          #   linker_env: CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER
+          #   linker: arm-linux-gnueabihf-gcc
+          # - os: macos-14
+          #   target: aarch64-apple-darwin
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          # - os: macos-15-intel
+          #   target: x86_64-apple-darwin
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          # - os: ubuntu-latest
+          #   target: aarch64-linux-android
+          #   artifact: zeroclaw
+          #   ext: tar.gz
+          #   ndk: true
+          #   experimental: true
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   artifact: zeroclaw.exe
+          #   ext: zip
     continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -392,6 +397,8 @@ jobs:
   build-desktop:
     name: Build Desktop App (macOS Universal)
     needs: [validate, web]
+    # fork-trim: skip desktop lanes for fnOS test releases.
+    if: ${{ false }}
     runs-on: macos-14
     # Two kernel release builds (arm64 + x86_64) feed the universal sidecar,
     # then the universal app build on top.
@@ -608,6 +615,8 @@ jobs:
   build-desktop-linux:
     name: Build Desktop App (Linux x86_64)
     needs: [validate]
+    # fork-trim: skip desktop lanes for fnOS test releases.
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     continue-on-error: true
@@ -667,6 +676,8 @@ jobs:
   build-desktop-windows:
     name: Build Desktop App (Windows x86_64)
     needs: [validate]
+    # fork-trim: skip desktop lanes for fnOS test releases.
+    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 150
     continue-on-error: true
@@ -1085,6 +1096,8 @@ jobs:
   redeploy-website:
     name: Trigger Website Redeploy
     needs: [publish]
+    # fork-trim: no public website for this fork.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger website redeploy
@@ -1100,7 +1113,8 @@ jobs:
   deploy-docs:
     name: Deploy Versioned Docs
     needs: [validate, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # fork-trim: no public docs site for this fork.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       actions: write   # workflow_dispatch of docs-deploy.yml
@@ -1239,12 +1253,12 @@ jobs:
   crates-preflight:
     name: Preflight crates.io Workspace
     needs: [validate]
-    # Fork deviation: package+verify of all 23 workspace crates exhausts the
+    # fork-trim: package+verify of all 23 workspace crates exhausts a
     # standard runner's disk ("No space left on device" in the runner's own
-    # diagnostics log), and this fork ships binaries and images, not crates.
-    # Non-blocking so publish/docker proceed; revisit when crates publishing
-    # matters here or the verify loop frees per-crate target dirs.
-    continue-on-error: true
+    # diagnostics), and this fork ships binaries and images, not crates.
+    # Skipped for fnOS test releases; `continue-on-error` is not valid on a
+    # reusable-workflow caller, so skip via `if`.
+    if: ${{ false }}
     uses: ./.github/workflows/pub-crates.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
@@ -1258,7 +1272,8 @@ jobs:
   crates:
     name: Publish crates.io Workspace
     needs: [validate, publish, crates-preflight]
-    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.crates-preflight.result == 'success' }}
+    # fork-trim: this fork does not publish to crates.io.
+    if: ${{ false }}
     uses: ./.github/workflows/pub-crates.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
@@ -1271,7 +1286,8 @@ jobs:
   scoop:
     name: Update Scoop Manifest
     needs: [validate, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # fork-trim: no scoop bucket for this fork.
+    if: ${{ false }}
     uses: ./.github/workflows/pub-scoop.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
@@ -1282,7 +1298,8 @@ jobs:
   aur:
     name: Update AUR Package
     needs: [validate, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # fork-trim: no AUR package for this fork.
+    if: ${{ false }}
     uses: ./.github/workflows/pub-aur.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
@@ -1294,7 +1311,8 @@ jobs:
   tweet:
     name: Tweet Release
     needs: [validate, publish, redeploy-website]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # fork-trim: no announcements for this fork.
+    if: ${{ false }}
     uses: ./.github/workflows/tweet-release.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
@@ -1304,7 +1322,8 @@ jobs:
   discord:
     name: Discord Announcement
     needs: [validate, publish, redeploy-website]
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    # fork-trim: no announcements for this fork.
+    if: ${{ false }}
     uses: ./.github/workflows/discord-release.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
