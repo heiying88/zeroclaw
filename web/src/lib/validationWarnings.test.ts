@@ -4,8 +4,10 @@ import test from 'node:test';
 async function loadValidationWarningMessage() {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { __ZEROCLAW_BASE__: '' },
+    value: { __ZEROCLAW_BASE__: '', __ZEROCLAW_LOCALE__: 'en' },
   });
+  // The window stub above pins English copy: the assertion below matches an
+  // English string and the app default locale is zh.
   const { validationWarningMessage } = await import('./validationWarnings.ts');
   delete (globalThis as { window?: unknown }).window;
   return validationWarningMessage;

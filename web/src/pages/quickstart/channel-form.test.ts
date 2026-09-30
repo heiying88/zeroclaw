@@ -162,6 +162,10 @@ test("ChannelAddForm preserves edited fields across real mode interactions", asy
       moduleCache: false,
       jsx: { runtime: "automatic" },
     });
+    // The assertions below match English button copy; the app default locale
+    // is zh, so seed the i18n seam before the component graph evaluates
+    // (moduleCache is off, so a post-hoc setLocale would hit another instance).
+    (domWindow as { __ZEROCLAW_LOCALE__?: string }).__ZEROCLAW_LOCALE__ = "en";
     const module = await jiti.import<typeof import("./ChannelAddForm.tsx")>(
       "./ChannelAddForm.tsx",
     );
