@@ -228,6 +228,7 @@ dist_extra_features = [
     "channel-lark",
     "channel-git",
     "whatsapp-web",
+    "channel-wechat",
 ]
 
 # Features whose build needs system C libraries or tooling the minimal static

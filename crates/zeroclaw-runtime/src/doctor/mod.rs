@@ -1265,14 +1265,15 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     }
 
     // TTS provider api_key presence. Unlike the model_provider check above,
-    // a missing key on `openai`, `elevenlabs`, or `google` is not "may rely
-    // on env vars or model_provider defaults" — `OpenAiTtsProvider::new` and
-    // its siblings (`crates/zeroclaw-channels/src/tts.rs`) bail on a
-    // missing/blank `api_key` before the entry is ever registered, so the
-    // provider silently drops out of `[providers.tts.*]` entirely.
+    // a missing key on `openai`, `elevenlabs`, `google`, or `siliconflow` is
+    // not "may rely on env vars or model_provider defaults" —
+    // `OpenAiTtsProvider::new` and its siblings
+    // (`crates/zeroclaw-channels/src/tts.rs`) bail on a missing/blank
+    // `api_key` before the entry is ever registered, so the provider
+    // silently drops out of `[providers.tts.*]` entirely.
     // `edge` and `piper` have no key gate and are never checked here.
     {
-        const TTS_KEY_GATED_FAMILIES: &[&str] = &["openai", "elevenlabs", "google"];
+        const TTS_KEY_GATED_FAMILIES: &[&str] = &["openai", "elevenlabs", "google", "siliconflow"];
         for (family, alias, entry) in config.providers.tts.iter_entries() {
             if !TTS_KEY_GATED_FAMILIES.contains(&family) {
                 continue;

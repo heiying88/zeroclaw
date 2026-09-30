@@ -332,6 +332,7 @@ pub enum TtsProviderKind {
     Google,
     Edge,
     Piper,
+    Siliconflow,
     Plugin,
 }
 
