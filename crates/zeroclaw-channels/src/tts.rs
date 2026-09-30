@@ -1017,6 +1017,133 @@ impl TtsProvider for PiperTtsProvider {
     }
 }
 
+// ── SiliconFlow TTS ──────────────────────────────────────────────
+
+/// SiliconFlow TTS model_provider (`POST /v1/audio/speech`).
+///
+/// SiliconFlow exposes an OpenAI-compatible speech endpoint; the documented
+/// request body is `{model, input, voice}` with Bearer auth and raw audio
+/// bytes in the response. Voices are model-qualified (`<model>:<name>`),
+/// e.g. `FunAudioLLM/CosyVoice2-0.5B:alex`.
+pub struct SiliconflowTtsProvider {
+    alias: String,
+    api_key: String,
+    model: String,
+    /// Full endpoint URL. Defaults to the SiliconFlow China endpoint; can be
+    /// overridden via `[providers.tts.siliconflow.<alias>].uri` to point at
+    /// any OpenAI-compatible speech backend.
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl SiliconflowTtsProvider {
+    pub fn new(alias: &str, config: &TtsProviderConfig) -> Result<Self> {
+        let api_key = config
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(ToOwned::to_owned)
+            .context(
+                "Missing SiliconFlow TTS API key: set `[providers.tts.siliconflow.<alias>].api_key` \
+                 (or via `ZEROCLAW_providers__tts__siliconflow__<alias>__api_key=...`).",
+            )?;
+
+        Ok(Self {
+            alias: alias.to_string(),
+            api_key,
+            model: config
+                .model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| "FunAudioLLM/CosyVoice2-0.5B".to_string()),
+            base_url: config
+                .uri
+                .clone()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or_else(|| "https://api.siliconflow.cn/v1/audio/speech".to_string()),
+            client: zeroclaw_config::schema::apply_runtime_proxy_to_builder(
+                reqwest::Client::builder().timeout(TTS_HTTP_TIMEOUT),
+                "channel.tts.siliconflow",
+            )
+            .build()
+            .context("Failed to build HTTP client for SiliconFlow TTS")?,
+        })
+    }
+
+    /// The voice the API expects for this provider's model: bare names are
+    /// qualified with the model prefix SiliconFlow requires.
+    fn qualified_voice(&self, voice: &str) -> String {
+        if voice.contains(':') {
+            voice.to_string()
+        } else {
+            format!("{}:{}", self.model, voice)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TtsProvider for SiliconflowTtsProvider {
+    fn name(&self) -> &str {
+        "siliconflow"
+    }
+
+    fn output_format(&self) -> &str {
+        // The endpoint returns MP3 unless a response_format was negotiated;
+        // this provider sends only the documented core fields.
+        "mp3"
+    }
+
+    async fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<u8>> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": text,
+            "voice": self.qualified_voice(voice),
+        });
+
+        let resp = self
+            .client
+            .post(&self.base_url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send SiliconFlow TTS request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let error_body: serde_json::Value = resp
+                .json()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"error": "unknown"}));
+            let msg = error_body["error"]["message"]
+                .as_str()
+                .or_else(|| error_body["message"].as_str())
+                .unwrap_or("unknown error");
+            bail!("SiliconFlow TTS API error ({}): {}", status, msg);
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read SiliconFlow TTS response body")?;
+        Ok(bytes.to_vec())
+    }
+
+    fn supported_voices(&self) -> Vec<String> {
+        // SiliconFlow ships preset, user-preset, and dynamic cloned voices;
+        // the catalogue is account-dependent, so return empty (dynamic).
+        Vec::new()
+    }
+
+    fn supported_formats(&self) -> Vec<String> {
+        ["mp3", "wav", "opus"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+}
+
 // ── TtsManager ───────────────────────────────────────────────────
 
 async fn write_audio_and_wait_with_output(
@@ -1123,6 +1250,9 @@ impl TtsManager {
                 "google" => GoogleTtsProvider::new(alias, instance).map(|p| Box::new(p) as _),
                 "edge" => EdgeTtsProvider::new(alias, instance).map(|p| Box::new(p) as _),
                 "piper" => Ok(Box::new(PiperTtsProvider::new(alias, instance)) as _),
+                "siliconflow" => {
+                    SiliconflowTtsProvider::new(alias, instance).map(|p| Box::new(p) as _)
+                }
                 _ => Err(anyhow::Error::msg(format!(
                     "unsupported typed TTS family: {family}"
                 ))),
@@ -1335,6 +1465,17 @@ impl ::zeroclaw_api::attribution::Attributable for PiperTtsProvider {
     fn role(&self) -> ::zeroclaw_api::attribution::Role {
         ::zeroclaw_api::attribution::Role::Provider(::zeroclaw_api::attribution::ProviderKind::Tts(
             ::zeroclaw_api::attribution::TtsProviderKind::Piper,
+        ))
+    }
+    fn alias(&self) -> &str {
+        &self.alias
+    }
+}
+
+impl ::zeroclaw_api::attribution::Attributable for SiliconflowTtsProvider {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        ::zeroclaw_api::attribution::Role::Provider(::zeroclaw_api::attribution::ProviderKind::Tts(
+            ::zeroclaw_api::attribution::TtsProviderKind::Siliconflow,
         ))
     }
     fn alias(&self) -> &str {
@@ -2041,6 +2182,140 @@ mod tests {
         let provider = OpenAiTtsProvider::new("test", &cfg).unwrap();
         assert_eq!(provider.base_url, "https://api.openai.com/v1/audio/speech");
         assert_eq!(provider.response_format, "opus");
+    }
+
+    #[test]
+    fn siliconflow_new_requires_api_key() {
+        let cfg = TtsProviderConfig::default();
+        assert!(
+            SiliconflowTtsProvider::new("test", &cfg).is_err(),
+            "a keyless siliconflow entry must refuse to construct"
+        );
+    }
+
+    #[test]
+    fn siliconflow_defaults_to_documented_endpoint_model_and_format() {
+        let cfg = TtsProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            ..TtsProviderConfig::default()
+        };
+        let provider = SiliconflowTtsProvider::new("test", &cfg).unwrap();
+        assert_eq!(
+            provider.base_url, "https://api.siliconflow.cn/v1/audio/speech",
+            "default endpoint must be the documented SiliconFlow speech URL"
+        );
+        assert_eq!(provider.model, "FunAudioLLM/CosyVoice2-0.5B");
+        assert_eq!(provider.output_format(), "mp3");
+        assert!(
+            SiliconflowTtsProvider::new("test", &cfg)
+                .unwrap()
+                .supported_voices()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn siliconflow_qualifies_bare_voice_and_sends_bearer_auth() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"FAKE_MP3".to_vec()))
+            .mount(&server)
+            .await;
+
+        let cfg = TtsProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            uri: Some(format!("{}/v1/audio/speech", server.uri())),
+            ..TtsProviderConfig::default()
+        };
+        let provider = SiliconflowTtsProvider::new("test", &cfg).unwrap();
+
+        let audio = provider.synthesize("你好世界", "alex").await.unwrap();
+        assert_eq!(audio, b"FAKE_MP3");
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one POST should reach the endpoint");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "FunAudioLLM/CosyVoice2-0.5B");
+        assert_eq!(body["input"], "你好世界");
+        assert_eq!(
+            body["voice"], "FunAudioLLM/CosyVoice2-0.5B:alex",
+            "a bare voice name must be qualified with the model prefix"
+        );
+        assert!(
+            body.get("response_format").is_none() && body.get("speed").is_none(),
+            "only the documented core fields belong on the wire"
+        );
+        let auth = reqs[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(auth, "Bearer sk-test");
+    }
+
+    #[tokio::test]
+    async fn siliconflow_accepts_model_qualified_voice_verbatim() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"AUDIO".to_vec()))
+            .mount(&server)
+            .await;
+
+        let cfg = TtsProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            uri: Some(format!("{}/v1/audio/speech", server.uri())),
+            ..TtsProviderConfig::default()
+        };
+        let provider = SiliconflowTtsProvider::new("test", &cfg).unwrap();
+        provider
+            .synthesize("hi", "FunAudioLLM/CosyVoice2-0.5B:anna")
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["voice"], "FunAudioLLM/CosyVoice2-0.5B:anna",
+            "an already-qualified voice must pass through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn siliconflow_surfaces_api_error_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": {"message": "Invalid API key"}})),
+            )
+            .mount(&server)
+            .await;
+
+        let cfg = TtsProviderConfig {
+            api_key: Some("sk-bad".to_string()),
+            uri: Some(format!("{}/v1/audio/speech", server.uri())),
+            ..TtsProviderConfig::default()
+        };
+        let provider = SiliconflowTtsProvider::new("test", &cfg).unwrap();
+
+        let err = provider.synthesize("hi", "alex").await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("401") && msg.contains("Invalid API key"),
+            "error must surface status and upstream message, got: {msg}"
+        );
     }
 
     #[test]

@@ -38,7 +38,8 @@ use super::schema::{
 };
 use super::schema::{
     EdgeTtsProviderConfig, ElevenLabsTtsProviderConfig, GoogleTtsProviderConfig,
-    OpenAITtsProviderConfig, PiperTtsProviderConfig, TtsProviderConfig as TtsBaseConfig,
+    OpenAITtsProviderConfig, PiperTtsProviderConfig, SiliconflowTtsProviderConfig,
+    TtsProviderConfig as TtsBaseConfig,
 };
 
 #[macro_export]
@@ -467,8 +468,8 @@ impl ModelProviders {
 }
 
 /// Typed TTS-provider container — one slot per TTS family. Mirrors
-/// `ModelProviders` but smaller (TTS has a closed set of 5 families:
-/// openai, elevenlabs, google, edge, piper). No catch-all needed.
+/// `ModelProviders` but smaller (TTS has a closed set of 6 families:
+/// openai, elevenlabs, google, edge, piper, siliconflow). No catch-all needed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "providers.tts"]
@@ -488,6 +489,9 @@ pub struct TtsProviders {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub piper: HashMap<String, PiperTtsProviderConfig>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub siliconflow: HashMap<String, SiliconflowTtsProviderConfig>,
 }
 
 impl TtsProviders {
@@ -518,6 +522,11 @@ impl TtsProviders {
                     self.piper
                         .iter()
                         .map(|(a, c)| ("piper", a.as_str(), &c.base)),
+                )
+                .chain(
+                    self.siliconflow
+                        .iter()
+                        .map(|(a, c)| ("siliconflow", a.as_str(), &c.base)),
                 ),
         )
     }
@@ -552,6 +561,11 @@ impl TtsProviders {
                     self.piper
                         .iter_mut()
                         .map(|(a, c)| ("piper", a.as_str(), &mut c.base)),
+                )
+                .chain(
+                    self.siliconflow
+                        .iter_mut()
+                        .map(|(a, c)| ("siliconflow", a.as_str(), &mut c.base)),
                 ),
         )
     }
@@ -563,6 +577,7 @@ impl TtsProviders {
             && self.google.is_empty()
             && self.edge.is_empty()
             && self.piper.is_empty()
+            && self.siliconflow.is_empty()
     }
 }
 
@@ -924,6 +939,7 @@ macro_rules! for_each_tts_provider_slot {
             (google, "google"),
             (edge, "edge"),
             (piper, "piper"),
+            (siliconflow, "siliconflow"),
         }
     };
 }

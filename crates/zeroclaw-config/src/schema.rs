@@ -6267,6 +6267,32 @@ pub struct PiperTtsProviderConfig {
     pub base: TtsProviderConfig,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
+)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SiliconflowTtsEndpoint {
+    #[default]
+    Default,
+}
+impl TtsEndpoint for SiliconflowTtsEndpoint {
+    fn uri(&self) -> &'static str {
+        match self {
+            Self::Default => "https://api.siliconflow.cn/v1/audio/speech",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "providers.tts.siliconflow"]
+pub struct SiliconflowTtsProviderConfig {
+    #[nested]
+    #[serde(flatten)]
+    pub base: TtsProviderConfig,
+}
+
 // ── Transcription providers (typed-family split, mirrors models/tts) ────
 //
 // Six family slots: `groq`, `openai`, `deepgram`, `assemblyai`, `google`,
@@ -43561,6 +43587,7 @@ api_key = "op://zeroclaw/provider/openai-api-key"
             google: std::iter::once(("a".to_string(), Default::default())).collect(),
             edge: std::iter::once(("a".to_string(), Default::default())).collect(),
             piper: std::iter::once(("a".to_string(), Default::default())).collect(),
+            siliconflow: std::iter::once(("a".to_string(), Default::default())).collect(),
         })
         .unwrap();
         let mut tts_fields: Vec<&str> =
