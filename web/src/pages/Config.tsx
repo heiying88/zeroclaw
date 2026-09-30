@@ -39,6 +39,7 @@ import FieldForm, {
 import PersonalityEditor from "../components/sections/PersonalityEditor";
 import SkillsBundleEditor from "../components/sections/SkillsBundleEditor";
 import BindChannelForm from "../components/sections/BindChannelForm";
+import ChannelQrLogin from "../components/ChannelQrLogin";
 import ReloadDaemonButton from "../components/sections/ReloadDaemonButton";
 import SectionPicker, {
   badgeIsGood,
@@ -277,6 +278,22 @@ export default function Config() {
               channelType={typeParam}
               alias={aliasParam}
               onBound={fetchDrift}
+            />
+          ),
+        });
+      }
+      // QR-pairing channels complete login in the dashboard instead of the
+      // terminal: the panel consumes the same login lifecycle the daemon
+      // prints, over the authenticated SSE stream.
+      if (activeSection.key === "channels" && typeParam === "wechat") {
+        channelExtraTabs.push({
+          key: "qr-login",
+          label: t("channel_qr.tab"),
+          render: () => (
+            <ChannelQrLogin
+              key={`${reloadKey}-${typeParam}-${aliasParam}-qr`}
+              channelType={typeParam}
+              alias={aliasParam}
             />
           ),
         });

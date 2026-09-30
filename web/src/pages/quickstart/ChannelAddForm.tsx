@@ -205,6 +205,12 @@ export function ChannelAddForm({
               required={d.required}
             />
           ))}
+
+          {type !== "" && descriptors.length === 0 && (
+            <div className="text-xs" style={MUTED}>
+              {t("quickstart.no_fields_qr_hint")}
+            </div>
+          )}
         </>
       )}
 

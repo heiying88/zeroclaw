@@ -24,6 +24,12 @@ export interface UseSSEOptions extends SSEClientOptions {
   maxEvents?: number;
   /** Optional filter: only keep events whose type matches. */
   filterTypes?: string[];
+  /**
+   * Optional predicate for frames without a discriminating `type` —
+   * structured log frames arrive as type "message" with their payload under
+   * `event`/`attributes`. Evaluated in addition to filterTypes.
+   */
+  filter?: (event: SSEEvent) => boolean;
 }
 
 /**
@@ -37,6 +43,7 @@ export function useSSE(options: UseSSEOptions = {}): UseSSEResult {
     autoConnect = true,
     maxEvents = 500,
     filterTypes,
+    filter,
     ...sseOptions
   } = options;
 
@@ -47,6 +54,9 @@ export function useSSE(options: UseSSEOptions = {}): UseSSEResult {
   // Keep filter in a ref so the callback doesn't need to be recreated
   const filterRef = useRef(filterTypes);
   filterRef.current = filterTypes;
+
+  const predicateRef = useRef(filter);
+  predicateRef.current = filter;
 
   const maxRef = useRef(maxEvents);
   maxRef.current = maxEvents;
@@ -72,6 +82,7 @@ export function useSSE(options: UseSSEOptions = {}): UseSSEResult {
       if (filterRef.current && filterRef.current.length > 0) {
         if (!filterRef.current.includes(event.type)) return;
       }
+      if (predicateRef.current && !predicateRef.current(event)) return;
 
       setEvents((prev) => {
         const next = [...prev, event];
