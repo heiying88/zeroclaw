@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["EdgeTtsProvider","ElevenLabsTtsProvider","GoogleTtsProvider","OpenAiTtsProvider","PiperTtsProvider","SiliconflowTtsProvider","TtsManager"],"trait":["TtsProvider"]};
