@@ -1,0 +1,182 @@
+//! HTTP routes for the Quickstart flow.
+
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde::{Deserialize, Serialize};
+use zeroclaw_config::presets::BuilderSubmission;
+use zeroclaw_runtime::quickstart::{
+    AppliedAgent, QuickstartError, QuickstartStep, Surface, apply_with_surface_checked,
+    record_dismissed, validate_only_with_surface,
+};
+
+use super::AppState;
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ValidateResult {
+    Ok,
+    Errors { errors: Vec<QuickstartError> },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApplyResult {
+    Applied {
+        agent: AppliedAgent,
+        daemon_restarted: bool,
+    },
+    Errors {
+        errors: Vec<QuickstartError>,
+    },
+}
+
+pub async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = state.config.read().clone();
+    let body = zeroclaw_runtime::quickstart::snapshot_state(&cfg);
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FieldsRequest {
+    pub section: zeroclaw_runtime::quickstart::FieldSection,
+    pub type_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FieldsResult {
+    pub fields: Vec<zeroclaw_runtime::quickstart::FieldDescriptor>,
+}
+
+pub async fn handle_fields(
+    State(_state): State<AppState>,
+    Json(req): Json<FieldsRequest>,
+) -> impl IntoResponse {
+    let body = FieldsResult {
+        fields: zeroclaw_runtime::quickstart::field_shape(req.section, &req.type_key),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+pub async fn handle_validate(
+    State(state): State<AppState>,
+    Json(submission): Json<BuilderSubmission>,
+) -> impl IntoResponse {
+    let cfg = state.config.read().clone();
+    let body = match validate_only_with_surface(&submission, &cfg, Surface::Web) {
+        Ok(()) => ValidateResult::Ok,
+        Err(errors) => ValidateResult::Errors { errors },
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DismissRequest {
+    pub run_id: String,
+    pub surface: Surface,
+    /// Furthest step the user reached. `None` = didn't progress past
+    /// the first selector.
+    #[serde(default)]
+    pub last_step: Option<QuickstartStep>,
+}
+
+pub async fn handle_dismiss(
+    State(_state): State<AppState>,
+    Json(req): Json<DismissRequest>,
+) -> impl IntoResponse {
+    record_dismissed(&req.run_id, req.surface, req.last_step);
+    (StatusCode::NO_CONTENT, ()).into_response()
+}
+
+pub async fn handle_apply(
+    State(state): State<AppState>,
+    principal: crate::principal_gate::RequestPrincipal,
+    Json(submission): Json<BuilderSubmission>,
+) -> axum::response::Response {
+    // Held through the swap below (and across `apply_with_surface`'s own
+    // save, which runs while this guard is held) so a concurrent config
+    // writer can't land between this read and the swap.
+    let _cfg_guard = std::sync::Arc::clone(&state.config_write_lock)
+        .lock_owned()
+        .await;
+    // Quickstart writes wherever the submission leads and saves on its
+    // own; the write set cannot be enumerated up front, so a scoped
+    // principal needs the wildcard selector.
+    let authorization = match crate::principal_gate::authorize_whole_config_write(
+        &principal,
+        &[
+            zeroclaw_api::grants::Verb::Create,
+            zeroclaw_api::grants::Verb::Update,
+        ],
+        &_cfg_guard,
+    ) {
+        Ok(authorization) => authorization,
+        Err(denied) => return denied.into_response(),
+    };
+    let mut working = state.config.read().clone();
+    // The staged policy is compiled BEFORE Quickstart's first write, so a
+    // rejected one cannot reach disk and then be reported as not saved.
+    let result = apply_with_surface_checked(submission, &mut working, Surface::Web, &|staged| {
+        zeroclaw_runtime::rpc::auth::validate_accepted_auth_config(staged)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    let body = match result {
+        Ok(agent) => {
+            authorization.publish_persisted(&working);
+            *state.config.write() = working;
+            state
+                .pending_reload
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let reload_signalled = signal_daemon_reload(&state);
+            ApplyResult::Applied {
+                agent,
+                daemon_restarted: reload_signalled,
+            }
+        }
+        Err(errors) => ApplyResult::Errors { errors },
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+fn signal_daemon_reload(state: &AppState) -> bool {
+    let Some(reload_tx) = state.reload_tx.clone() else {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "reason": "no_supervisor",
+                })),
+            "quickstart: daemon reload not available (standalone gateway)"
+        );
+        return false;
+    };
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Start),
+        "quickstart: daemon reload signalled"
+    );
+    let shutdown_tx = state.shutdown_tx.clone();
+    state
+        .pending_reload
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    zeroclaw_spawn::spawn!(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = reload_tx.send(true);
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)
+                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                })),
+            "quickstart: daemon reload dispatched"
+        );
+    });
+    true
+}
+
+// Per-family alias collection lives in
+// `zeroclaw_runtime::quickstart::snapshot_state` so both transports
+// share one implementation.
