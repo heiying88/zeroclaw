@@ -31,9 +31,30 @@ mkdir -p \
 
 case "$mode" in
   from-artifacts)
-    tar xzf "$artifact_dir/zeroclaw-x86_64-unknown-linux-gnu.tar.gz" -C "$context_dir/bin/amd64"
-    tar xzf "$artifact_dir/zeroclaw-aarch64-unknown-linux-gnu.tar.gz" -C "$context_dir/bin/arm64"
-    for arch in amd64 arm64; do
+    # Extract whichever arch tarballs are present and validate only those —
+    # a linux/amd64-only release (fork-trim) ships no aarch64 artifact, and
+    # Dockerfile.ci COPYs per-TARGETARCH, so absent arches are simply never
+    # referenced by the image build.
+    extracted=0
+    for pair in amd64:x86_64-unknown-linux-gnu arm64:aarch64-unknown-linux-gnu; do
+      arch="${pair%%:*}"
+      target="${pair#*:}"
+      tarball="$artifact_dir/zeroclaw-$target.tar.gz"
+      if [[ -f "$tarball" ]]; then
+        tar xzf "$tarball" -C "$context_dir/bin/$arch"
+        extracted=$((extracted + 1))
+      else
+        echo "note: no $target artifact in $artifact_dir — image will lack linux/$arch" >&2
+      fi
+    done
+    if [[ "$extracted" -eq 0 ]]; then
+      echo "no release artifacts found in $artifact_dir" >&2
+      exit 1
+    fi
+    for pair in amd64:x86_64-unknown-linux-gnu arm64:aarch64-unknown-linux-gnu; do
+      arch="${pair%%:*}"
+      target="${pair#*:}"
+      [[ -f "$artifact_dir/zeroclaw-$target.tar.gz" ]] || continue
       for bin in zeroclaw zerocode; do
         [[ -x "$context_dir/bin/$arch/$bin" ]] || {
           echo "missing executable: $context_dir/bin/$arch/$bin" >&2

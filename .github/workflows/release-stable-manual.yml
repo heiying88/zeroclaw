@@ -763,11 +763,10 @@ jobs:
 
   publish:
     name: Publish Stable Release
-    # The Linux/Windows desktop jobs are continue-on-error: listing them in
-    # needs only sequences the download; their failure cannot block publish.
-    # crates-preflight is a hard gate: a release whose crates cannot publish
-    # must fail before the GitHub Release makes the version public.
-    needs: [validate, release-notes, build, build-desktop, build-desktop-linux, build-desktop-windows, sbom, crates-preflight]
+    # fork-trim: needs lists only jobs this fork actually runs. The desktop
+    # lanes and crates-preflight above stay defined (if: false) for easy
+    # restore, but a skipped `needs` entry would skip publish too.
+    needs: [validate, release-notes, build, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write

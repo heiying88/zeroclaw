@@ -11,9 +11,14 @@ name: Docker Publish
 # flips in a follow-up after the baseline is triaged.
 
 on:
-  push:
-    tags:
-      - "v*"
+  # fork-trim: no tag-push trigger on this fork — Release Stable's docker job
+  # already pushes this fork's images, and this matrix's publish jobs are
+  # guarded to the upstream repo anyway (they would only burn a runner to
+  # resolve a matrix that never publishes). Restore the trigger for a full
+  # distribution release.
+  # push:
+  #   tags:
+  #     - "v*"
   workflow_call:
     inputs:
       release_ref:
