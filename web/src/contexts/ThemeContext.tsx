@@ -1,5 +1,6 @@
 import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { colorThemeMap, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, type ColorThemeId } from './colorThemes';
+import { DEFAULT_LOCALE, SUPPORTED_LOCALES } from '../lib/i18n';
 
 // ── Types (was ThemeContextDef.ts) ───────────────────────────────────────────
 
@@ -90,7 +91,11 @@ function loadMonoFont(font: string) {
 export const LOCALE_STORAGE_KEY = 'zeroclaw-locale';
 
 export function loadLocale(): string {
-  return localStorage.getItem(LOCALE_STORAGE_KEY) ?? 'en';
+  const stored = localStorage.getItem(LOCALE_STORAGE_KEY);
+  // A stored locale that is no longer surfaced (or never existed) falls back
+  // to the default, so browsers saved under a hidden locale aren't stranded.
+  if (stored && SUPPORTED_LOCALES.some(({ code }) => code === stored)) return stored;
+  return DEFAULT_LOCALE;
 }
 
 export function saveLocale(locale: string) {

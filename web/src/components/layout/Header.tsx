@@ -141,7 +141,9 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
             <Settings className="h-[20px] w-[20px] shrink-0" />
           </Button>
 
-          {/* Language switcher dropdown */}
+          {/* Language switcher dropdown — hidden entirely while only one
+              locale is surfaced (see SUPPORTED_LOCALES). */}
+          {SUPPORTED_LOCALES.length > 1 && (
           <div ref={langRef} className="relative" style={{ zIndex: 9999 }}>
             <Button
               variant="ghost"
@@ -202,6 +204,7 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
               </div>
             )}
           </div>
+          )}
 
           {/* Logout */}
           <Button

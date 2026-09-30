@@ -22,8 +22,10 @@ async function renderPanel({
 }): Promise<string> {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { __ZEROCLAW_BASE__: '' },
+    value: { __ZEROCLAW_BASE__: '', __ZEROCLAW_LOCALE__: 'en' },
   });
+  // The window stub above pins English copy: the assertions below match
+  // English strings and the app default locale is zh.
   const { ToolCatalogWarningPanel } = await import('./ToolCatalogWarningPanel.ts');
   const html = renderToStaticMarkup(
     createElement(ToolCatalogWarningPanel, {
