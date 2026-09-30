@@ -2239,6 +2239,29 @@ export function bindChannelIdentity(
   });
 }
 
+export interface RelinkChannelResponse {
+  channel: string;
+  /** `cleared` | `nothing_to_clear` | `unsupported` (409) */
+  outcome: "cleared" | "nothing_to_clear" | "unsupported";
+  removed?: string[];
+  restart_required?: boolean;
+  note?: string;
+  error?: string;
+}
+
+/**
+ * Clear a QR-pairing channel's persisted login so the next start mints a
+ * fresh QR. Follow up with `reloadDaemon()` to restart the channel and
+ * begin pairing — the QR rides the authenticated SSE `/api/events` stream
+ * as a broadcast-only `attributes.login` frame.
+ */
+export function relinkChannel(channel: string): Promise<RelinkChannelResponse> {
+  return apiFetch<RelinkChannelResponse>(
+    `/api/channels/${encodeURIComponent(channel)}/relink`,
+    { method: "POST" },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Logs (persisted JSONL via zeroclaw-log)
 // ---------------------------------------------------------------------------

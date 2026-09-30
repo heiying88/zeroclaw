@@ -385,8 +385,9 @@ sections! {
         key:   "providers.tts",
         shape: TypedFamilyMap,
         group: Foundation,
-        help:  "Text-to-speech providers (OpenAI, ElevenLabs, Google, Edge, Piper). \
-                Configure one per voice / language; agents reference them by alias.",
+        help:  "Text-to-speech providers (OpenAI, ElevenLabs, Google, Edge, Piper, \
+                SiliconFlow). Configure one per voice / language; agents reference \
+                them by alias.",
     },
     TranscriptionProviders => {
         key:   "providers.transcription",
