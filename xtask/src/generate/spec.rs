@@ -1437,6 +1437,7 @@ mod tests {
                 "channel-lark",
                 "channel-git",
                 "whatsapp-web",
+                "channel-wechat",
             ]
             .map(str::to_owned),
         );
