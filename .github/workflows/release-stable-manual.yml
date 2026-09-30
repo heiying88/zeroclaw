@@ -1239,6 +1239,12 @@ jobs:
   crates-preflight:
     name: Preflight crates.io Workspace
     needs: [validate]
+    # Fork deviation: package+verify of all 23 workspace crates exhausts the
+    # standard runner's disk ("No space left on device" in the runner's own
+    # diagnostics log), and this fork ships binaries and images, not crates.
+    # Non-blocking so publish/docker proceed; revisit when crates publishing
+    # matters here or the verify loop frees per-crate target dirs.
+    continue-on-error: true
     uses: ./.github/workflows/pub-crates.yml
     with:
       release_tag: ${{ needs.validate.outputs.tag }}
