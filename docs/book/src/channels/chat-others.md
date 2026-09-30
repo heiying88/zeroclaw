@@ -24,6 +24,10 @@ iMessage is bridged through the Linq Partner API (`[channels.linq.<alias>]`):
 
 WeChat personal iLink Bot uses QR-code login against the iLink Bot API for personal WeChat conversations.
 
+### Voice (TTS) replies
+
+With `[tts] enabled` and the owning agent's `tts_provider` set, the channel answers voice notes in kind: an inbound voice message puts that sender into one-shot voice mode, and the reply is synthesized and delivered as an audio **file message** (`voice.mp3`) that WeChat plays inline. This file form is deliberate, not a placeholder — the iLink send flow uploads image, video, or file media only; the protocol's voice item exists for inbound messages (transcription text, codec id, duration), so there is no bot-sent native voice bubble to construct. A peer group with `output_modality = "voice"` pins a contact to voice-only replies durably; `output_modality = "text"` suppresses voice. Replies that read poorly aloud (URLs, JSON, code blocks, errors, short status) stay text, and a failed synthesis falls back to text so no reply is lost. Inbound voice transcription itself is server-side — the iLink API returns the text with the voice item.
+
 ## WeCom (企业微信 / WeChat Work)
 
 Two WeCom variants are implemented. They map to different WeCom products, build features, and config keys, so pick the one that matches how the bot is provisioned:

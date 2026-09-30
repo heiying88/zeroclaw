@@ -12954,6 +12954,10 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("wechat", &alias))
             };
+            let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+                let cfg_arc = config_arc.clone();
+                Arc::new(move || cfg_arc.read().channel_voice_peers("wechat", "default"))
+            };
             let workspace_dir = one_shot_channel_workspace_dir(&config, "wechat", &alias);
             Ok(Arc::new(
                 WeChatChannel::new(
@@ -12964,6 +12968,8 @@ fn build_channel_by_id(
                     Some(WeChatChannel::resolve_state_dir(wc.state_dir.as_deref())),
                 )?
                 .with_persistence(config_arc.clone())
+                .with_voice_peer_resolver(voice_peer_resolver)
+                .with_tts(&config)
                 .with_workspace_dir(workspace_dir),
             ))
         }
@@ -15182,6 +15188,11 @@ fn collect_configured_channels(
             let alias = alias.clone();
             Arc::new(move || cfg_arc.read().channel_external_peers("wechat", &alias))
         };
+        let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || cfg_arc.read().channel_voice_peers("wechat", &alias))
+        };
         match WeChatChannel::new(
             alias.clone(),
             peer_resolver,
@@ -15198,6 +15209,8 @@ fn collect_configured_channels(
                     channel: Arc::new(
                         channel
                             .with_persistence(config_arc.clone())
+                            .with_voice_peer_resolver(voice_peer_resolver)
+                            .with_tts(&config)
                             .with_workspace_dir(
                                 config.channel_workspace_dir(&format!("wechat.{alias}")),
                             ),

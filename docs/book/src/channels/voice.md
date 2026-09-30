@@ -37,7 +37,15 @@ The agent doesn't send audio anywhere; wake detection is local. Only post-wake s
 
 ## TTS (outbound speech synthesis)
 
-TTS is an output service channels call into, not its own inbound channel. Global defaults live under `tts`. TTS provider instances are configured under `providers.tts.<type>.<alias>` (OpenAI, ElevenLabs, Google, Edge, Piper) and selected per agent via the agent's `tts_provider`. See [Model Providers](../providers/overview.md) for the provider entries and per-agent wiring. Provider API keys are secrets; set them through the gateway, zerocode, or `zeroclaw config set`, never in plaintext.
+TTS is an output service channels call into, not its own inbound channel. Global defaults live under `tts`. TTS provider instances are configured under `providers.tts.<type>.<alias>` (OpenAI, ElevenLabs, Google, Edge, Piper, SiliconFlow) and selected per agent via the agent's `tts_provider`. See [Model Providers](../providers/overview.md) for the provider entries and per-agent wiring. Provider API keys are secrets; set them through the gateway, zerocode, or `zeroclaw config set`, never in plaintext.
+
+### SiliconFlow
+
+`[providers.tts.siliconflow.<alias>]` targets SiliconFlow's OpenAI-compatible speech endpoint (`https://api.siliconflow.cn/v1/audio/speech`; override with `uri`). The default model is `FunAudioLLM/CosyVoice2-0.5B` and voices are model-qualified — a bare `voice = "alex"` is sent as `FunAudioLLM/CosyVoice2-0.5B:alex`, while an already-qualified voice passes through verbatim. The response is MP3.
+
+### Voice replies on WeChat
+
+The WeChat channel delivers TTS replies as **audio file messages** (`voice.mp3`), which WeChat renders with an inline audio player. The iLink send flow defines media uploads for image, video, and file only — the protocol's voice item is inbound-shaped, so there is no native bot-sent voice bubble to construct. Voice replies trigger in two ways: send the agent a voice note and the next reply mirrors that modality once, or list a contact in a peer group with `output_modality = "voice"` for a durable voice-only route. Replies that are URLs, JSON, code, or errors stay text; a synthesis failure falls back to text so the reply is never lost.
 
 ---
 

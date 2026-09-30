@@ -747,6 +747,17 @@ pub struct WeChatChannel {
     /// Workspace directory used for storing inbound attachments and resolving
     /// `/workspace/...` paths from generated replies.
     workspace_dir: Option<PathBuf>,
+    /// TTS manager for voice replies. `None` until `with_tts` wires one from
+    /// a config whose `[tts] enabled` resolves a provider for the owning
+    /// agent; voice-modality targets then fall back to plain text.
+    tts_manager: Option<Arc<super::tts::TtsManager>>,
+    /// Resolves voice-modality peers live from canonical peer-group state
+    /// (`channel_voice_peers("wechat", alias)`); no cached snapshot.
+    voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Senders whose latest inbound message was a voice note. The next reply
+    /// mirrors that modality once, then the entry retires unless the sender
+    /// is also a configured voice peer.
+    voice_chats: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Persistent account data (token + metadata).
@@ -915,6 +926,17 @@ fn build_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
     headers
 }
 
+/// Whether an item_list carries at least one voice item. Drives the
+/// inbound `voice_origin` fact and the mirrored voice-reply modality.
+fn items_contain_voice(items: &[serde_json::Value]) -> bool {
+    items.iter().any(|item| {
+        item.get("type")
+            .and_then(|v| v.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+            .is_some_and(|item_type| item_type == ITEM_TYPE_VOICE)
+    })
+}
+
 /// Extract text content from an iLink message's item_list.
 fn extract_text_from_items(items: &[serde_json::Value]) -> String {
     for item in items {
@@ -1062,6 +1084,9 @@ impl WeChatChannel {
             typing_handle: Mutex::new(None),
             state_dir,
             workspace_dir: None,
+            tts_manager: None,
+            voice_peer_resolver: Arc::new(Vec::new),
+            voice_chats: Mutex::new(std::collections::HashSet::new()),
         };
 
         // Try to load persisted state
@@ -1081,6 +1106,55 @@ impl WeChatChannel {
     pub fn with_persistence(mut self, config: Arc<parking_lot::RwLock<Config>>) -> Self {
         self.persist = Some(config);
         self
+    }
+
+    /// Wire the TTS manager from the owning agent's config. Mirrors the
+    /// Telegram pattern: gated on `[tts] enabled`, resolved for the agent
+    /// bound to `wechat.<alias>`; a resolution failure logs a warning and
+    /// leaves voice replies off rather than failing channel construction.
+    pub fn with_tts(mut self, config: &Config) -> Self {
+        if config.tts.enabled {
+            let owner = config.agent_for_channel(&format!("wechat.{}", self.alias));
+            match super::tts::TtsManager::from_config_for_agent(config, owner) {
+                Ok(m) => self.tts_manager = Some(Arc::new(m)),
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "error": zeroclaw_runtime::security::scrub(&format!("{e}"))
+                            })),
+                        "TTS disabled"
+                    );
+                }
+            }
+        }
+        self
+    }
+
+    /// Set the resolver used to resolve voice-modality peers live (no cached
+    /// state), sourced from `channel_voice_peers("wechat", alias)`.
+    pub fn with_voice_peer_resolver(
+        mut self,
+        voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    ) -> Self {
+        self.voice_peer_resolver = voice_peer_resolver;
+        self
+    }
+
+    /// Whether the recipient is a configured voice-modality peer group
+    /// member. Peer groups name senders; a destination only stands in for
+    /// one by coincidence, so this stays a literal comparison.
+    fn destination_is_voice_peer(&self, recipient: &str) -> bool {
+        (self.voice_peer_resolver)().iter().any(|p| p == recipient)
+    }
+
+    /// Whether a recipient should receive a voice reply: the sender's last
+    /// inbound message was a voice note (mirrored modality), or the
+    /// destination is a configured voice peer.
+    fn is_voice_chat(&self, recipient: &str) -> bool {
+        self.voice_chats.lock().contains(recipient) || self.destination_is_voice_peer(recipient)
     }
 
     /// Default state directory when `[channels.wechat.<alias>] state_dir`
@@ -1414,6 +1488,7 @@ impl WeChatChannel {
         text: &str,
         timestamp: u64,
         attachment_content: Option<String>,
+        voice_origin: bool,
     ) -> Option<Box<ChannelMessage>> {
         let content = match (attachment_content, text.is_empty()) {
             (Some(marker), true) => marker,
@@ -1421,6 +1496,13 @@ impl WeChatChannel {
             (None, false) => text.to_string(),
             (None, true) => return None,
         };
+
+        if voice_origin {
+            // Enter voice-reply mode so the next reply mirrors the sender's
+            // modality. Session state only — a configured voice peer group
+            // remains the durable source of the modality route.
+            self.voice_chats.lock().insert(from_user_id.to_string());
+        }
 
         Some(Box::new(ChannelMessage {
             id: message_id,
@@ -1434,6 +1516,7 @@ impl WeChatChannel {
             interruption_scope_id: None,
             attachments: Vec::new(),
             subject: None,
+            voice_origin,
 
             ..Default::default()
         }))
@@ -2478,6 +2561,49 @@ impl WeChatChannel {
         .await
     }
 
+    /// Synthesize `text` with the wired TTS manager and deliver it as a
+    /// WeChat audio file message.
+    ///
+    /// The iLink send flow uploads image, video, or file media only — the
+    /// protocol's voice entry is inbound-shaped (its documented fields are
+    /// transcription text, codec id, and duration), and no outbound voice
+    /// item exists to construct. Voice replies therefore ride the documented
+    /// file path; WeChat renders an inline audio player for the result.
+    async fn send_voice_reply(
+        &self,
+        to: &str,
+        text: &str,
+        context_token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let tts_manager = self
+            .tts_manager
+            .as_deref()
+            .context("no TTS manager wired for WeChat voice reply")?;
+        let audio = tts_manager.synthesize(text).await?;
+        anyhow::ensure!(!audio.is_empty(), "TTS produced empty audio");
+        let format = tts_manager.agent_output_format().unwrap_or("mp3");
+        let payload = WeChatMediaPayload {
+            file_name: format!("voice.{format}"),
+            bytes: audio,
+        };
+        let uploaded = self
+            .upload_media_payload(to, WeChatAttachmentKind::Audio, &payload)
+            .await?;
+        let item = serde_json::json!({
+            "type": ITEM_TYPE_FILE,
+            "file_item": {
+                "media": {
+                    "encrypt_query_param": uploaded.encrypted_query_param,
+                    "aes_key": uploaded.aes_key_base64,
+                    "encrypt_type": 1
+                },
+                "file_name": payload.file_name,
+                "len": uploaded.raw_size.to_string()
+            }
+        });
+        self.send_message_items(to, vec![item], context_token).await
+    }
+
     async fn send_attachment(
         &self,
         to: &str,
@@ -2778,6 +2904,84 @@ impl Channel for WeChatChannel {
                     .with_attrs(::serde_json::json!({"recipient": recipient})),
                 "no context_token for , message may fail to associate"
             );
+        }
+
+        // Voice-modality replies: the sender's last inbound message was a
+        // voice note (mirrored modality, one-shot) or the route targets a
+        // voice peer / forces voice. Audio rides the file path (see
+        // `send_voice_reply`); a synthesis or delivery failure falls back
+        // to the text below instead of losing the reply.
+        let mut voice_delivered = false;
+        if !message.suppress_voice
+            && self.tts_manager.is_some()
+            && (message.force_voice || self.is_voice_chat(recipient))
+        {
+            let forced_or_peer = message.force_voice || self.destination_is_voice_peer(recipient);
+            match crate::util::voice_reply_skip_reason(&content) {
+                Some(reason) => {
+                    // Stable literal per the logging contract: the
+                    // classification rides solely in `attributes`.
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip)
+                            .with_attrs(::serde_json::json!({
+                                "recipient": recipient,
+                                "reason": reason,
+                                "content_len": content.len(),
+                            })),
+                        "voice reply skipped"
+                    );
+                }
+                None => {
+                    match self
+                        .send_voice_reply(recipient, &content, context_token.as_deref())
+                        .await
+                    {
+                        Ok(()) => {
+                            voice_delivered = true;
+                            ::zeroclaw_log::record!(
+                                INFO,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                ),
+                                &format!("voice reply sent ({} chars)", content.len())
+                            );
+                        }
+                        Err(e) => {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "error": zeroclaw_runtime::security::scrub(&format!("{e}"))
+                                })),
+                                "TTS voice reply failed; falling back to text"
+                            );
+                        }
+                    }
+                    // The mirrored modality retires after one reply either
+                    // way — a failed voice attempt must not pin every later
+                    // reply to TTS. Configured voice peers keep their
+                    // route; it resolves live from canonical state.
+                    if !forced_or_peer {
+                        self.voice_chats.lock().remove(recipient);
+                    }
+                }
+            }
+        }
+
+        // Voice-only routes (configured voice peer or force_voice): the
+        // audio file is the sole final reply once delivered. Without a
+        // delivered voice, the text below is the fallback.
+        if !message.suppress_voice
+            && voice_delivered
+            && (message.force_voice || self.destination_is_voice_peer(recipient))
+        {
+            return Ok(());
         }
 
         let (text_without_markers, attachments) = parse_attachment_markers(&content);
@@ -3186,6 +3390,7 @@ impl Channel for WeChatChannel {
                     &text,
                     timestamp,
                     attachment_content,
+                    items_contain_voice(&items),
                 ) {
                     staged.push(StagedInbound::Deliver(channel_msg));
                 }
@@ -3299,6 +3504,7 @@ impl Channel for WeChatChannel {
                                 &text,
                                 timestamp,
                                 attachment_content,
+                                items_contain_voice(&items),
                             ) {
                                 *item = StagedInbound::Deliver(message);
                             }
@@ -3498,13 +3704,14 @@ impl Channel for WeChatChannel {
         content: &str,
         _suppress_voice: bool,
     ) -> anyhow::Result<()> {
-        // Send the final accumulated response
-        let result = self
-            .send(&SendMessage::new(
-                content.to_string(),
-                recipient.to_string(),
-            ))
-            .await;
+        // Send the final accumulated response. The runtime's voice-modality
+        // verdict rides in on `suppress_voice`; dropping it here would voice
+        // system notices that the lifecycle explicitly muted.
+        let mut final_message = SendMessage::new(content.to_string(), recipient.to_string());
+        if _suppress_voice {
+            final_message = final_message.suppress_voice();
+        }
+        let result = self.send(&final_message).await;
         let _ = self.stop_typing(recipient).await; // Always stop the typing indicator
         result
     }
@@ -4668,6 +4875,299 @@ mod tests {
             "get_updates_buf": cursor,
             "msgs": msgs,
         })
+    }
+
+    /// Config shape for WeChat TTS tests: `[tts] enabled`, an agent owning
+    /// `wechat.wechat_test_alias` whose `tts_provider` points at a
+    /// siliconflow instance, and that instance's `uri` aimed at `tts_uri`.
+    fn wechat_tts_config(tts_uri: String) -> Config {
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, SiliconflowTtsProviderConfig, TtsProviderConfig,
+        };
+        let mut config = Config::default();
+        config.tts.enabled = true;
+        config.agents.insert(
+            "main".to_string(),
+            AliasedAgentConfig {
+                tts_provider: "siliconflow.default".into(),
+                channels: vec!["wechat.wechat_test_alias".into()],
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config.providers.tts.siliconflow.insert(
+            "default".to_string(),
+            SiliconflowTtsProviderConfig {
+                base: TtsProviderConfig {
+                    api_key: Some("sk-test".to_string()),
+                    uri: Some(tts_uri),
+                    voice: Some("alex".to_string()),
+                    ..TtsProviderConfig::default()
+                },
+            },
+        );
+        config
+    }
+
+    /// Substantive reply text that clears `voice_reply_skip_reason`.
+    fn voice_reply_text() -> &'static str {
+        "Сбросьте питание контроллера и проверьте терминаторы шины Profibus DP на обоих концах."
+    }
+
+    /// Count POSTs that reached the TTS endpoint (path `/v1/audio/speech`).
+    async fn tts_hits(mock_server: &wiremock::MockServer) -> usize {
+        mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/v1/audio/speech")
+            .count()
+    }
+
+    /// Every `sendmessage` body's item_list, in send order.
+    async fn sendmessage_items(mock_server: &wiremock::MockServer) -> Vec<serde_json::Value> {
+        let mut all = Vec::new();
+        for request in mock_server.received_requests().await.unwrap() {
+            if request.url.path() != "/ilink/bot/sendmessage" {
+                continue;
+            }
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(items) = body["msg"]["item_list"].as_array() {
+                all.extend(items.iter().cloned());
+            }
+        }
+        all
+    }
+
+    #[tokio::test]
+    async fn voice_peer_reply_synthesizes_and_delivers_audio_file() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let mock_server = MockServer::start().await;
+        // One catch-all serves every leg: sendmessage (ret=0 envelope),
+        // getuploadurl (`upload_param`), CDN /upload (`x-encrypted-param`
+        // header), and the siliconflow TTS POST (body bytes act as audio).
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("x-encrypted-param", "cdn-param")
+                    .set_body_json(serde_json::json!({
+                        "ret": 0, "errcode": 0, "upload_param": "up"
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = wechat_tts_config(format!("{}/v1/audio/speech", mock_server.uri()));
+        let mut channel = wechat_channel_for_mock(temp.path().to_path_buf(), mock_server.uri());
+        channel.cdn_base_url = mock_server.uri();
+        let channel = channel
+            .with_voice_peer_resolver(Arc::new(|| vec!["user1".to_string()]))
+            .with_tts(&config);
+
+        channel
+            .send(&SendMessage::new(
+                voice_reply_text().to_string(),
+                "user1".to_string(),
+            ))
+            .await
+            .expect("voice-peer reply should deliver");
+
+        assert_eq!(
+            tts_hits(&mock_server).await,
+            1,
+            "exactly one synthesis call must reach the TTS endpoint"
+        );
+        let requests = mock_server.received_requests().await.unwrap();
+        let upload_calls: Vec<&wiremock::Request> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/ilink/bot/getuploadurl")
+            .collect();
+        assert_eq!(upload_calls.len(), 1, "voice rides the upload path once");
+        let upload_body: serde_json::Value = serde_json::from_slice(&upload_calls[0].body).unwrap();
+        assert_eq!(
+            upload_body["media_type"], 3,
+            "audio is uploaded with the documented FILE media type"
+        );
+        assert!(
+            requests.iter().any(|r| r.url.path() == "/upload"),
+            "the synthesized bytes must reach the CDN upload endpoint"
+        );
+
+        let items = sendmessage_items(&mock_server).await;
+        assert_eq!(
+            items.len(),
+            1,
+            "a configured voice peer gets the audio file as the sole reply"
+        );
+        assert_eq!(items[0]["type"], 4, "audio is delivered as a file item");
+        assert_eq!(
+            items[0]["file_item"]["file_name"], "voice.mp3",
+            "the file name reflects the provider's output format"
+        );
+        assert!(
+            items[0]["file_item"]["media"]["encrypt_query_param"].is_string()
+                && items[0]["file_item"]["len"].is_string(),
+            "file item must reference the uploaded CDN media"
+        );
+    }
+
+    #[tokio::test]
+    async fn suppress_voice_skips_tts_and_delivers_text() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ret": 0})))
+            .mount(&mock_server)
+            .await;
+
+        let config = wechat_tts_config(format!("{}/v1/audio/speech", mock_server.uri()));
+        let channel = wechat_channel_for_mock(temp.path().to_path_buf(), mock_server.uri())
+            .with_voice_peer_resolver(Arc::new(|| vec!["user1".to_string()]))
+            .with_tts(&config);
+
+        channel
+            .send(
+                &SendMessage::new(voice_reply_text().to_string(), "user1".to_string())
+                    .suppress_voice(),
+            )
+            .await
+            .expect("suppressed reply should still deliver text");
+
+        assert_eq!(
+            tts_hits(&mock_server).await,
+            0,
+            "suppress_voice must not synthesize"
+        );
+        let items = sendmessage_items(&mock_server).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], 1, "the reply is plain text");
+    }
+
+    #[tokio::test]
+    async fn tts_failure_falls_back_to_text_delivery() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let mock_server = MockServer::start().await;
+        let tts_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ret": 0})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({"error": {"message": "boom"}})),
+            )
+            .mount(&tts_server)
+            .await;
+
+        let config = wechat_tts_config(format!("{}/v1/audio/speech", tts_server.uri()));
+        let channel = wechat_channel_for_mock(temp.path().to_path_buf(), mock_server.uri())
+            .with_voice_peer_resolver(Arc::new(|| vec!["user1".to_string()]))
+            .with_tts(&config);
+
+        channel
+            .send(&SendMessage::new(
+                voice_reply_text().to_string(),
+                "user1".to_string(),
+            ))
+            .await
+            .expect("a failed synthesis must fall back to text, not lose the reply");
+
+        assert_eq!(tts_hits(&tts_server).await, 1);
+        let items = sendmessage_items(&mock_server).await;
+        assert_eq!(
+            items.len(),
+            1,
+            "the text fallback is the sole delivery after a TTS failure"
+        );
+        assert_eq!(items[0]["type"], 1);
+    }
+
+    #[tokio::test]
+    async fn voice_reply_mirrors_inbound_voice_once() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("x-encrypted-param", "cdn-param")
+                    .set_body_json(serde_json::json!({
+                        "ret": 0, "errcode": 0, "upload_param": "up"
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = wechat_tts_config(format!("{}/v1/audio/speech", mock_server.uri()));
+        let mut channel = wechat_channel_for_mock(temp.path().to_path_buf(), mock_server.uri());
+        channel.cdn_base_url = mock_server.uri();
+        let channel = channel.with_tts(&config);
+        assert!(
+            !channel.is_voice_chat("user2"),
+            "precondition: user2 is not yet in voice mode"
+        );
+
+        // Inbound voice note enters mirror mode and marks voice_origin.
+        let voice_item = serde_json::json!({
+            "type": 3,
+            "voice_item": {"text": "语音内容"}
+        });
+        let inbound = channel
+            .build_inbound_channel_message(
+                "user2",
+                "m1".to_string(),
+                "语音内容",
+                0,
+                None,
+                items_contain_voice(&[voice_item]),
+            )
+            .expect("voice inbound should build");
+        assert!(inbound.voice_origin);
+        assert!(channel.is_voice_chat("user2"));
+
+        // Mirror reply: voice note accompanies the text.
+        channel
+            .send(&SendMessage::new(
+                voice_reply_text().to_string(),
+                "user2".to_string(),
+            ))
+            .await
+            .expect("mirror reply should deliver");
+        assert_eq!(tts_hits(&mock_server).await, 1);
+        let items = sendmessage_items(&mock_server).await;
+        assert_eq!(
+            items.len(),
+            2,
+            "mirror mode delivers the audio file and the text"
+        );
+        assert_eq!(items[0]["type"], 4, "audio file first");
+        assert_eq!(items[1]["type"], 1, "text follows");
+
+        // The mirrored modality retires: the next reply is text only.
+        channel
+            .send(&SendMessage::new(
+                voice_reply_text().to_string(),
+                "user2".to_string(),
+            ))
+            .await
+            .expect("second reply should deliver");
+        assert_eq!(
+            tts_hits(&mock_server).await,
+            1,
+            "mirror mode is one-shot per inbound voice note"
+        );
     }
 
     /// The `msg.context_token` carried by each `sendmessage` request the

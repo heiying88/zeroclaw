@@ -470,7 +470,12 @@ fn leading_bracket_skip_reason(content: &str) -> Option<&'static str> {
 /// Why a reply was not queued as a TTS voice note, or `None` when it is worth
 /// speaking. Voice chats mirror the agent's prose, not its plumbing: URLs,
 /// JSON, code blocks, raw tool output and one-line status make poor audio.
-#[cfg(any(feature = "channel-telegram", feature = "whatsapp-web", test))]
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
+    test
+))]
 pub(crate) fn voice_reply_skip_reason(content: &str) -> Option<&'static str> {
     if content.len() <= MIN_VOICE_REPLY_BYTES {
         return Some("too_short");
