@@ -1024,7 +1024,8 @@ impl TtsProvider for PiperTtsProvider {
 /// SiliconFlow exposes an OpenAI-compatible speech endpoint; the documented
 /// request body is `{model, input, voice}` with Bearer auth and raw audio
 /// bytes in the response. Voices are model-qualified (`<model>:<name>`),
-/// e.g. `FunAudioLLM/CosyVoice2-0.5B:alex`.
+/// e.g. `FunAudioLLM/CosyVoice2-0.5B:alex`. The OpenAI-style `speed` and
+/// `response_format` knobs ride along only when explicitly configured.
 pub struct SiliconflowTtsProvider {
     alias: String,
     api_key: String,
@@ -1033,6 +1034,11 @@ pub struct SiliconflowTtsProvider {
     /// overridden via `[providers.tts.siliconflow.<alias>].uri` to point at
     /// any OpenAI-compatible speech backend.
     base_url: String,
+    /// Optional speech-rate override (`speed`); sent only when configured.
+    speed: Option<f64>,
+    /// Optional audio format override (`response_format`); sent only when
+    /// configured and also names the bytes `output_format()` reports.
+    response_format: Option<String>,
     client: reqwest::Client,
 }
 
@@ -1062,6 +1068,11 @@ impl SiliconflowTtsProvider {
                 .clone()
                 .filter(|u| !u.trim().is_empty())
                 .unwrap_or_else(|| "https://api.siliconflow.cn/v1/audio/speech".to_string()),
+            speed: config.speed,
+            response_format: config
+                .response_format
+                .clone()
+                .filter(|f| !f.trim().is_empty()),
             client: zeroclaw_config::schema::apply_runtime_proxy_to_builder(
                 reqwest::Client::builder().timeout(TTS_HTTP_TIMEOUT),
                 "channel.tts.siliconflow",
@@ -1089,17 +1100,26 @@ impl TtsProvider for SiliconflowTtsProvider {
     }
 
     fn output_format(&self) -> &str {
-        // The endpoint returns MP3 unless a response_format was negotiated;
-        // this provider sends only the documented core fields.
-        "mp3"
+        // The endpoint returns MP3 by default; an explicitly configured
+        // response_format both names the negotiated bytes and rides on the
+        // request.
+        self.response_format.as_deref().unwrap_or("mp3")
     }
 
     async fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<u8>> {
-        let body = serde_json::json!({
+        // The documented core body is {model, input, voice}; the optional
+        // OpenAI-style knobs join only when the operator set them.
+        let mut body = serde_json::json!({
             "model": self.model,
             "input": text,
             "voice": self.qualified_voice(voice),
         });
+        if let Some(speed) = self.speed {
+            body["speed"] = serde_json::json!(speed);
+        }
+        if let Some(format) = &self.response_format {
+            body["response_format"] = serde_json::json!(format);
+        }
 
         let resp = self
             .client
@@ -2247,7 +2267,7 @@ mod tests {
         );
         assert!(
             body.get("response_format").is_none() && body.get("speed").is_none(),
-            "only the documented core fields belong on the wire"
+            "unset optional knobs must stay off the wire"
         );
         let auth = reqs[0]
             .headers
@@ -2255,6 +2275,41 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
         assert_eq!(auth, "Bearer sk-test");
+    }
+
+    #[tokio::test]
+    async fn siliconflow_sends_explicitly_configured_speed_and_format() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"FAKE_WAV".to_vec()))
+            .mount(&server)
+            .await;
+
+        let cfg = TtsProviderConfig {
+            api_key: Some("sk-test".to_string()),
+            uri: Some(format!("{}/v1/audio/speech", server.uri())),
+            speed: Some(1.2),
+            response_format: Some("wav".to_string()),
+            ..TtsProviderConfig::default()
+        };
+        let provider = SiliconflowTtsProvider::new("test", &cfg).unwrap();
+        assert_eq!(
+            provider.output_format(),
+            "wav",
+            "an explicit response_format must name the returned bytes"
+        );
+
+        let audio = provider.synthesize("hello", "alex").await.unwrap();
+        assert_eq!(audio, b"FAKE_WAV");
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["speed"].as_f64(), Some(1.2));
+        assert_eq!(body["response_format"], "wav");
     }
 
     #[tokio::test]

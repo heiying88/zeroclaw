@@ -41,7 +41,7 @@ TTS is an output service channels call into, not its own inbound channel. Global
 
 ### SiliconFlow
 
-`[providers.tts.siliconflow.<alias>]` targets SiliconFlow's OpenAI-compatible speech endpoint (`https://api.siliconflow.cn/v1/audio/speech`; override with `uri`). The default model is `FunAudioLLM/CosyVoice2-0.5B` and voices are model-qualified — a bare `voice = "alex"` is sent as `FunAudioLLM/CosyVoice2-0.5B:alex`, while an already-qualified voice passes through verbatim. The response is MP3.
+`[providers.tts.siliconflow.<alias>]` targets SiliconFlow's OpenAI-compatible speech endpoint (`https://api.siliconflow.cn/v1/audio/speech`; override with `uri`). The default model is `FunAudioLLM/CosyVoice2-0.5B` and voices are model-qualified — a bare `voice = "alex"` is sent as `FunAudioLLM/CosyVoice2-0.5B:alex`, while an already-qualified voice passes through verbatim. The response is MP3 by default; an explicit `response_format` (and optional `speed`) rides on the request only when configured, and `response_format` also names the delivered audio file's extension.
 
 ### Voice replies on WeChat
 
